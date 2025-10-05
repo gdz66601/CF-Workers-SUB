@@ -10,6 +10,7 @@ let FileName = 'CF-Workers-SUB';
 let SUBUpdateTime = 6; //自定义订阅更新时间，单位小时
 let total = 99;//TB
 let timestamp = 4102329600000;//2099-12-31
+let adminToken = 'admin_' + mytoken; // 管理员token
 
 //节点链接 + 订阅链接
 let MainData = `
@@ -48,6 +49,9 @@ export default {
 		guestToken = env.GUESTTOKEN || env.GUEST || guestToken;
 		if (!guestToken) guestToken = await MD5MD5(mytoken);
 		const 访客订阅 = guestToken;
+		
+		// 获取管理员token
+		adminToken = env.ADMINTOKEN || adminToken;
 		//console.log(`${fakeUserID}\n${fakeHostName}`); // 打印fakeID
 
 		let UD = Math.floor(((timestamp - Date.now()) / timestamp * total * 1099511627776) / 2);
@@ -55,7 +59,19 @@ export default {
 		let expire = Math.floor(timestamp / 1000);
 		SUBUpdateTime = env.SUBUPTIME || SUBUpdateTime;
 
-		if (!([mytoken, fakeToken, 访客订阅].includes(token) || url.pathname == ("/" + mytoken) || url.pathname.includes("/" + mytoken + "?"))) {
+		// 检查是否为管理员访问
+		if (token === adminToken || url.pathname === ("/" + adminToken)) {
+			if (userAgent.includes('mozilla')) {
+				await sendMessage(`#管理员访问 ${FileName}`, request.headers.get('CF-Connecting-IP'), `UA: ${userAgentHeader}</tg-spoiler>\n域名: ${url.hostname}\n<tg-spoiler>入口: ${url.pathname + url.search}</tg-spoiler>`);
+				return await AdminPanel(request, env);
+			}
+		}
+		
+		// 获取所有有效的访客token
+		const validGuestTokens = await getValidGuestTokens(env);
+		const isValidGuestToken = validGuestTokens.includes(token);
+
+		if (!([mytoken, fakeToken, 访客订阅].includes(token) || isValidGuestToken || url.pathname == ("/" + mytoken) || url.pathname.includes("/" + mytoken + "?"))) {
 			if (TG == 1 && url.pathname !== "/" && url.pathname !== "/favicon.ico") await sendMessage(`#异常访问 ${FileName}`, request.headers.get('CF-Connecting-IP'), `UA: ${userAgent}</tg-spoiler>\n域名: ${url.hostname}\n<tg-spoiler>入口: ${url.pathname + url.search}</tg-spoiler>`);
 			if (env.URL302) return Response.redirect(env.URL302, 302);
 			else if (env.URL) return await proxyURL(env.URL, url);
@@ -66,6 +82,11 @@ export default {
 				},
 			});
 		} else {
+			// 记录访问日志
+			if (token && token !== mytoken && token !== fakeToken) {
+				await logTokenAccess(env, token, request.headers.get('CF-Connecting-IP'), userAgent);
+			}
+			
 			if (env.KV) {
 				await 迁移地址列表(env, 'LINK.txt');
 				if (userAgent.includes('mozilla') && !url.search) {
@@ -825,4 +846,341 @@ async function KV(request, env, txt = 'ADD.txt', guest) {
 			headers: { "Content-Type": "text/plain;charset=utf-8" }
 		});
 	}
+}
+
+// 获取所有有效的访客token
+async function getValidGuestTokens(env) {
+	if (!env.KV) return [];
+	try {
+		const tokensData = await env.KV.get('GUEST_TOKENS');
+		if (!tokensData) return [];
+		const tokens = JSON.parse(tokensData);
+		return tokens.filter(tokenInfo => tokenInfo.active).map(tokenInfo => tokenInfo.token);
+	} catch (error) {
+		console.error('获取访客token失败:', error);
+		return [];
+	}
+}
+
+// 记录token访问日志
+async function logTokenAccess(env, token, ip, userAgent) {
+	if (!env.KV) return;
+	try {
+		const logKey = `ACCESS_LOG_${token}`;
+		const existingLog = await env.KV.get(logKey);
+		let logs = existingLog ? JSON.parse(existingLog) : [];
+		
+		logs.push({
+			timestamp: new Date().toISOString(),
+			ip: ip,
+			userAgent: userAgent
+		});
+		
+		// 只保留最近100条记录
+		if (logs.length > 100) {
+			logs = logs.slice(-100);
+		}
+		
+		await env.KV.put(logKey, JSON.stringify(logs));
+	} catch (error) {
+		console.error('记录访问日志失败:', error);
+	}
+}
+
+// 管理员面板
+async function AdminPanel(request, env) {
+	const url = new URL(request.url);
+	
+	try {
+		// POST请求处理
+		if (request.method === "POST") {
+			if (!env.KV) return new Response("未绑定KV空间", { status: 400 });
+			
+			const formData = await request.formData();
+			const action = formData.get('action');
+			
+			if (action === 'create_token') {
+				const tokenName = formData.get('tokenName');
+				const tokenValue = formData.get('tokenValue') || await generateRandomToken();
+				
+				const tokensData = await env.KV.get('GUEST_TOKENS') || '[]';
+				const tokens = JSON.parse(tokensData);
+				
+				tokens.push({
+					token: tokenValue,
+					name: tokenName,
+					createdAt: new Date().toISOString(),
+					active: true
+				});
+				
+				await env.KV.put('GUEST_TOKENS', JSON.stringify(tokens));
+				return new Response("Token创建成功");
+			}
+			
+			if (action === 'toggle_token') {
+				const tokenValue = formData.get('tokenValue');
+				
+				const tokensData = await env.KV.get('GUEST_TOKENS') || '[]';
+				const tokens = JSON.parse(tokensData);
+				
+				const tokenIndex = tokens.findIndex(t => t.token === tokenValue);
+				if (tokenIndex !== -1) {
+					tokens[tokenIndex].active = !tokens[tokenIndex].active;
+					await env.KV.put('GUEST_TOKENS', JSON.stringify(tokens));
+					return new Response("Token状态更新成功");
+				}
+				return new Response("Token不存在", { status: 404 });
+			}
+			
+			if (action === 'delete_token') {
+				const tokenValue = formData.get('tokenValue');
+				
+				const tokensData = await env.KV.get('GUEST_TOKENS') || '[]';
+				const tokens = JSON.parse(tokensData);
+				
+				const filteredTokens = tokens.filter(t => t.token !== tokenValue);
+				await env.KV.put('GUEST_TOKENS', JSON.stringify(filteredTokens));
+				
+				// 删除对应的访问日志
+				await env.KV.delete(`ACCESS_LOG_${tokenValue}`);
+				
+				return new Response("Token删除成功");
+			}
+		}
+		
+		// GET请求 - 显示管理面板
+		const tokensData = await env.KV?.get('GUEST_TOKENS') || '[]';
+		const tokens = JSON.parse(tokensData);
+		
+		// 获取访问统计
+		const accessStats = {};
+		for (const tokenInfo of tokens) {
+			try {
+				const logData = await env.KV?.get(`ACCESS_LOG_${tokenInfo.token}`);
+				if (logData) {
+					const logs = JSON.parse(logData);
+					accessStats[tokenInfo.token] = {
+						totalAccess: logs.length,
+						lastAccess: logs.length > 0 ? logs[logs.length - 1].timestamp : null,
+						recentLogs: logs.slice(-5)
+					};
+				} else {
+					accessStats[tokenInfo.token] = {
+						totalAccess: 0,
+						lastAccess: null,
+						recentLogs: []
+					};
+				}
+			} catch (error) {
+				console.error(`获取${tokenInfo.token}访问统计失败:`, error);
+				accessStats[tokenInfo.token] = {
+					totalAccess: 0,
+					lastAccess: null,
+					recentLogs: []
+				};
+			}
+		}
+		
+		const html = `
+			<!DOCTYPE html>
+			<html>
+				<head>
+					<title>${FileName} 管理面板</title>
+					<meta charset="utf-8">
+					<meta name="viewport" content="width=device-width, initial-scale=1">
+					<style>
+						body {
+							margin: 0;
+							padding: 20px;
+							font-family: Arial, sans-serif;
+							background-color: #f5f5f5;
+						}
+						.container {
+							max-width: 1200px;
+							margin: 0 auto;
+							background: white;
+							padding: 20px;
+							border-radius: 8px;
+							box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+						}
+						h1 {
+							color: #333;
+							border-bottom: 2px solid #4CAF50;
+							padding-bottom: 10px;
+						}
+						.section {
+							margin: 20px 0;
+							padding: 15px;
+							border: 1px solid #ddd;
+							border-radius: 5px;
+						}
+						.form-group {
+							margin: 10px 0;
+						}
+						.form-group label {
+							display: block;
+							margin-bottom: 5px;
+							font-weight: bold;
+						}
+						.form-group input {
+							width: 100%;
+							padding: 8px;
+							border: 1px solid #ddd;
+							border-radius: 4px;
+							box-sizing: border-box;
+						}
+						.btn {
+							padding: 8px 16px;
+							border: none;
+							border-radius: 4px;
+							cursor: pointer;
+							margin: 5px;
+						}
+						.btn-primary { background: #4CAF50; color: white; }
+						.btn-warning { background: #ff9800; color: white; }
+						.btn-danger { background: #f44336; color: white; }
+						.btn-secondary { background: #6c757d; color: white; }
+						.token-item {
+							border: 1px solid #ddd;
+							padding: 15px;
+							margin: 10px 0;
+							border-radius: 5px;
+							background: #f9f9f9;
+						}
+						.token-active { border-left: 4px solid #4CAF50; }
+						.token-inactive { border-left: 4px solid #f44336; }
+						.stats {
+							display: grid;
+							grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+							gap: 10px;
+							margin: 10px 0;
+						}
+						.stat-item {
+							padding: 10px;
+							background: #e8f5e8;
+							border-radius: 4px;
+							text-align: center;
+						}
+						.log-item {
+							padding: 5px;
+							margin: 2px 0;
+							background: #f0f0f0;
+							border-radius: 3px;
+							font-size: 12px;
+						}
+					</style>
+				</head>
+				<body>
+					<div class="container">
+						<h1>🛠️ ${FileName} 管理面板</h1>
+						
+						<div class="section">
+							<h2>📊 系统概览</h2>
+							<div class="stats">
+								<div class="stat-item">
+									<strong>${tokens.length}</strong><br>总Token数
+								</div>
+								<div class="stat-item">
+									<strong>${tokens.filter(t => t.active).length}</strong><br>活跃Token
+								</div>
+								<div class="stat-item">
+									<strong>${Object.values(accessStats).reduce((sum, stat) => sum + stat.totalAccess, 0)}</strong><br>总访问次数
+								</div>
+							</div>
+						</div>
+						
+						<div class="section">
+							<h2>➕ 创建新Token</h2>
+							<form method="POST">
+								<input type="hidden" name="action" value="create_token">
+								<div class="form-group">
+									<label>Token名称:</label>
+									<input type="text" name="tokenName" required placeholder="例如: 朋友A的订阅">
+								</div>
+								<div class="form-group">
+									<label>Token值 (留空自动生成):</label>
+									<input type="text" name="tokenValue" placeholder="留空将自动生成随机token">
+								</div>
+								<button type="submit" class="btn btn-primary">创建Token</button>
+							</form>
+						</div>
+						
+						<div class="section">
+							<h2>📋 Token管理</h2>
+							${tokens.length === 0 ? '<p>暂无Token</p>' : tokens.map(tokenInfo => {
+								const stats = accessStats[tokenInfo.token] || { totalAccess: 0, lastAccess: null, recentLogs: [] };
+								return `
+									<div class="token-item ${tokenInfo.active ? 'token-active' : 'token-inactive'}">
+										<h3>${tokenInfo.name} ${tokenInfo.active ? '🟢' : '🔴'}</h3>
+										<p><strong>Token:</strong> <code>${tokenInfo.token}</code></p>
+										<p><strong>创建时间:</strong> ${new Date(tokenInfo.createdAt).toLocaleString()}</p>
+										<p><strong>访问次数:</strong> ${stats.totalAccess}</p>
+										<p><strong>最后访问:</strong> ${stats.lastAccess ? new Date(stats.lastAccess).toLocaleString() : '从未访问'}</p>
+										
+										<h4>订阅链接:</h4>
+										<p><a href="https://${url.hostname}/sub?token=${tokenInfo.token}" target="_blank">https://${url.hostname}/sub?token=${tokenInfo.token}</a></p>
+										
+										${stats.recentLogs.length > 0 ? `
+											<h4>最近访问记录:</h4>
+											${stats.recentLogs.map(log => `
+												<div class="log-item">
+													${new Date(log.timestamp).toLocaleString()} - IP: ${log.ip}
+												</div>
+											`).join('')}
+										` : ''}
+										
+										<div style="margin-top: 10px;">
+											<form method="POST" style="display: inline;">
+												<input type="hidden" name="action" value="toggle_token">
+												<input type="hidden" name="tokenValue" value="${tokenInfo.token}">
+												<button type="submit" class="btn ${tokenInfo.active ? 'btn-warning' : 'btn-primary'}">
+													${tokenInfo.active ? '禁用' : '启用'}
+												</button>
+											</form>
+											<form method="POST" style="display: inline;" onsubmit="return confirm('确定要删除这个Token吗？')">
+												<input type="hidden" name="action" value="delete_token">
+												<input type="hidden" name="tokenValue" value="${tokenInfo.token}">
+												<button type="submit" class="btn btn-danger">删除</button>
+											</form>
+										</div>
+									</div>
+								`;
+							}).join('')}
+						</div>
+						
+						<div class="section">
+							<h2>ℹ️ 使用说明</h2>
+							<ul>
+								<li>管理员Token: <code>${adminToken}</code></li>
+								<li>管理面板访问地址: <code>https://${url.hostname}/${adminToken}</code></li>
+								<li>创建的访客Token可以用于订阅访问，但无法访问管理面板</li>
+								<li>禁用的Token将无法访问订阅服务</li>
+								<li>删除Token会同时删除其访问日志</li>
+							</ul>
+						</div>
+					</div>
+				</body>
+			</html>
+		`;
+		
+		return new Response(html, {
+			headers: { "Content-Type": "text/html;charset=utf-8" }
+		});
+	} catch (error) {
+		console.error('管理面板错误:', error);
+		return new Response("管理面板错误: " + error.message, {
+			status: 500,
+			headers: { "Content-Type": "text/plain;charset=utf-8" }
+		});
+	}
+}
+
+// 生成随机token
+async function generateRandomToken() {
+	const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+	let result = '';
+	for (let i = 0; i < 16; i++) {
+		result += chars.charAt(Math.floor(Math.random() * chars.length));
+	}
+	return result;
 }
