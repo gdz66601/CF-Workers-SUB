@@ -894,7 +894,10 @@ async function AdminPanel(request, env) {
 	try {
 		// POST请求处理
 		if (request.method === "POST") {
-			if (!env.KV) return new Response("未绑定KV空间", { status: 400 });
+			if (!env.KV) return new Response(JSON.stringify({success: false, message: "未绑定KV空间"}), { 
+				status: 400,
+				headers: { "Content-Type": "application/json;charset=utf-8" }
+			});
 			
 			const formData = await request.formData();
 			const action = formData.get('action');
@@ -906,15 +909,30 @@ async function AdminPanel(request, env) {
 				const tokensData = await env.KV.get('GUEST_TOKENS') || '[]';
 				const tokens = JSON.parse(tokensData);
 				
-				tokens.push({
+				// 检查token是否已存在
+				if (tokens.some(t => t.token === tokenValue)) {
+					return new Response(JSON.stringify({success: false, message: "Token已存在"}), {
+						headers: { "Content-Type": "application/json;charset=utf-8" }
+					});
+				}
+				
+				const newToken = {
 					token: tokenValue,
 					name: tokenName,
 					createdAt: new Date().toISOString(),
 					active: true
-				});
+				};
 				
+				tokens.push(newToken);
 				await env.KV.put('GUEST_TOKENS', JSON.stringify(tokens));
-				return new Response("Token创建成功");
+				
+				return new Response(JSON.stringify({
+					success: true, 
+					message: "Token创建成功",
+					token: newToken
+				}), {
+					headers: { "Content-Type": "application/json;charset=utf-8" }
+				});
 			}
 			
 			if (action === 'toggle_token') {
@@ -927,9 +945,19 @@ async function AdminPanel(request, env) {
 				if (tokenIndex !== -1) {
 					tokens[tokenIndex].active = !tokens[tokenIndex].active;
 					await env.KV.put('GUEST_TOKENS', JSON.stringify(tokens));
-					return new Response("Token状态更新成功");
+					
+					return new Response(JSON.stringify({
+						success: true, 
+						message: "Token状态更新成功",
+						token: tokens[tokenIndex]
+					}), {
+						headers: { "Content-Type": "application/json;charset=utf-8" }
+					});
 				}
-				return new Response("Token不存在", { status: 404 });
+				return new Response(JSON.stringify({success: false, message: "Token不存在"}), { 
+					status: 404,
+					headers: { "Content-Type": "application/json;charset=utf-8" }
+				});
 			}
 			
 			if (action === 'delete_token') {
@@ -944,7 +972,13 @@ async function AdminPanel(request, env) {
 				// 删除对应的访问日志
 				await env.KV.delete(`ACCESS_LOG_${tokenValue}`);
 				
-				return new Response("Token删除成功");
+				return new Response(JSON.stringify({
+					success: true, 
+					message: "Token删除成功",
+					tokenValue: tokenValue
+				}), {
+					headers: { "Content-Type": "application/json;charset=utf-8" }
+				});
 			}
 		}
 		
@@ -990,9 +1024,9 @@ async function AdminPanel(request, env) {
 					<meta name="viewport" content="width=device-width, initial-scale=1">
 					<style>
 						body {
+							font-family: Arial, sans-serif;
 							margin: 0;
 							padding: 20px;
-							font-family: Arial, sans-serif;
 							background-color: #f5f5f5;
 						}
 						.container {
@@ -1036,6 +1070,10 @@ async function AdminPanel(request, env) {
 							cursor: pointer;
 							margin: 5px;
 						}
+						.btn:disabled {
+							opacity: 0.6;
+							cursor: not-allowed;
+						}
 						.btn-primary { background: #4CAF50; color: white; }
 						.btn-warning { background: #ff9800; color: white; }
 						.btn-danger { background: #f44336; color: white; }
@@ -1068,11 +1106,149 @@ async function AdminPanel(request, env) {
 							border-radius: 3px;
 							font-size: 12px;
 						}
+						.message {
+							padding: 10px;
+							margin: 10px 0;
+							border-radius: 4px;
+							display: none;
+						}
+						.message.success {
+							background: #d4edda;
+							color: #155724;
+							border: 1px solid #c3e6cb;
+						}
+						.message.error {
+							background: #f8d7da;
+							color: #721c24;
+							border: 1px solid #f5c6cb;
+						}
+						.loading {
+							opacity: 0.6;
+							pointer-events: none;
+						}
 					</style>
+					<script>
+						// 显示消息
+						function showMessage(message, type = 'success') {
+							const messageDiv = document.getElementById('message');
+							messageDiv.textContent = message;
+							messageDiv.className = 'message ' + type;
+							messageDiv.style.display = 'block';
+							setTimeout(() => {
+								messageDiv.style.display = 'none';
+							}, 3000);
+						}
+
+						// AJAX提交表单
+						async function submitForm(form, callback) {
+							const formData = new FormData(form);
+							const button = form.querySelector('button[type="submit"]');
+							const originalText = button.textContent;
+							
+							button.disabled = true;
+							button.textContent = '处理中...';
+							
+							try {
+								const response = await fetch(window.location.href, {
+									method: 'POST',
+									body: formData
+								});
+								
+								const result = await response.json();
+								
+								if (result.success) {
+									showMessage(result.message, 'success');
+									if (callback) callback(result);
+								} else {
+									showMessage(result.message, 'error');
+								}
+							} catch (error) {
+								showMessage('操作失败: ' + error.message, 'error');
+							} finally {
+								button.disabled = false;
+								button.textContent = originalText;
+							}
+						}
+
+						// 创建Token
+						function createToken() {
+							const form = document.getElementById('createTokenForm');
+							submitForm(form, (result) => {
+								// 清空表单
+								form.reset();
+								// 刷新页面显示新token
+								setTimeout(() => location.reload(), 1000);
+							});
+							return false;
+						}
+
+						// 切换Token状态
+						function toggleToken(tokenValue, button) {
+							const form = document.createElement('form');
+							form.innerHTML = \`
+								<input type="hidden" name="action" value="toggle_token">
+								<input type="hidden" name="tokenValue" value="\${tokenValue}">
+							\`;
+							
+							submitForm(form, (result) => {
+								// 更新按钮状态
+								const tokenItem = button.closest('.token-item');
+								const statusIcon = tokenItem.querySelector('h3');
+								
+								if (result.token.active) {
+									button.textContent = '禁用';
+									button.className = 'btn btn-warning';
+									tokenItem.className = 'token-item token-active';
+									statusIcon.innerHTML = statusIcon.innerHTML.replace('🔴', '🟢');
+								} else {
+									button.textContent = '启用';
+									button.className = 'btn btn-primary';
+									tokenItem.className = 'token-item token-inactive';
+									statusIcon.innerHTML = statusIcon.innerHTML.replace('🟢', '🔴');
+								}
+							});
+						}
+
+						// 删除Token
+						function deleteToken(tokenValue, button) {
+							if (!confirm('确定要删除这个Token吗？')) {
+								return;
+							}
+							
+							const form = document.createElement('form');
+							form.innerHTML = \`
+								<input type="hidden" name="action" value="delete_token">
+								<input type="hidden" name="tokenValue" value="\${tokenValue}">
+							\`;
+							
+							submitForm(form, (result) => {
+								// 移除token项
+								const tokenItem = button.closest('.token-item');
+								tokenItem.style.transition = 'opacity 0.3s';
+								tokenItem.style.opacity = '0';
+								setTimeout(() => {
+									tokenItem.remove();
+									// 更新统计数据
+									updateStats();
+								}, 300);
+							});
+						}
+
+						// 更新统计数据
+						function updateStats() {
+							const tokenItems = document.querySelectorAll('.token-item');
+							const activeTokens = document.querySelectorAll('.token-active').length;
+							
+							document.querySelector('.stats .stat-item:nth-child(1) strong').textContent = tokenItems.length;
+							document.querySelector('.stats .stat-item:nth-child(2) strong').textContent = activeTokens;
+						}
+					</script>
 				</head>
 				<body>
 					<div class="container">
 						<h1>🛠️ ${FileName} 管理面板</h1>
+						
+						<div id="message" class="message"></div>
 						
 						<div class="section">
 							<h2>📊 系统概览</h2>
@@ -1091,7 +1267,7 @@ async function AdminPanel(request, env) {
 						
 						<div class="section">
 							<h2>➕ 创建新Token</h2>
-							<form method="POST">
+							<form id="createTokenForm" onsubmit="createToken(); return false;">
 								<input type="hidden" name="action" value="create_token">
 								<div class="form-group">
 									<label>Token名称:</label>
@@ -1130,18 +1306,14 @@ async function AdminPanel(request, env) {
 										` : ''}
 										
 										<div style="margin-top: 10px;">
-											<form method="POST" style="display: inline;">
-												<input type="hidden" name="action" value="toggle_token">
-												<input type="hidden" name="tokenValue" value="${tokenInfo.token}">
-												<button type="submit" class="btn ${tokenInfo.active ? 'btn-warning' : 'btn-primary'}">
-													${tokenInfo.active ? '禁用' : '启用'}
-												</button>
-											</form>
-											<form method="POST" style="display: inline;" onsubmit="return confirm('确定要删除这个Token吗？')">
-												<input type="hidden" name="action" value="delete_token">
-												<input type="hidden" name="tokenValue" value="${tokenInfo.token}">
-												<button type="submit" class="btn btn-danger">删除</button>
-											</form>
+											<button type="button" class="btn ${tokenInfo.active ? 'btn-warning' : 'btn-primary'}" 
+													onclick="toggleToken('${tokenInfo.token}', this)">
+												${tokenInfo.active ? '禁用' : '启用'}
+											</button>
+											<button type="button" class="btn btn-danger" 
+													onclick="deleteToken('${tokenInfo.token}', this)">
+												删除
+											</button>
 										</div>
 									</div>
 								`;
