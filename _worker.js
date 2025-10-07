@@ -963,10 +963,33 @@ async function AdminPanel(request, env) {
 			if (action === 'delete_token') {
 				const tokenValue = formData.get('tokenValue');
 				
+				if (!tokenValue) {
+					return new Response(JSON.stringify({
+						success: false, 
+						message: "Token值不能为空"
+					}), {
+						headers: { "Content-Type": "application/json;charset=utf-8" }
+					});
+				}
+				
 				const tokensData = await env.KV.get('GUEST_TOKENS') || '[]';
 				const tokens = JSON.parse(tokensData);
 				
+				// 检查token是否存在
+				const tokenExists = tokens.some(t => t.token === tokenValue);
+				if (!tokenExists) {
+					return new Response(JSON.stringify({
+						success: false, 
+						message: "Token不存在"
+					}), {
+						headers: { "Content-Type": "application/json;charset=utf-8" }
+					});
+				}
+				
+				// 过滤掉要删除的token
 				const filteredTokens = tokens.filter(t => t.token !== tokenValue);
+				
+				// 保存更新后的数据
 				await env.KV.put('GUEST_TOKENS', JSON.stringify(filteredTokens));
 				
 				// 删除对应的访问日志
@@ -975,7 +998,8 @@ async function AdminPanel(request, env) {
 				return new Response(JSON.stringify({
 					success: true, 
 					message: "Token删除成功",
-					tokenValue: tokenValue
+					tokenValue: tokenValue,
+					remainingCount: filteredTokens.length
 				}), {
 					headers: { "Content-Type": "application/json;charset=utf-8" }
 				});
@@ -1142,31 +1166,47 @@ async function AdminPanel(request, env) {
 						// AJAX提交表单
 						async function submitForm(form, callback) {
 							const formData = new FormData(form);
-							const button = form.querySelector('button[type="submit"]');
-							const originalText = button.textContent;
+							const button = form.querySelector('button[type="submit"]') || document.activeElement;
+							const originalText = button ? button.textContent : '';
 							
-							button.disabled = true;
-							button.textContent = '处理中...';
+							if (button) {
+								button.disabled = true;
+								button.textContent = '处理中...';
+							}
 							
 							try {
+								console.log('提交表单数据:', Object.fromEntries(formData)); // 调试日志
+								
 								const response = await fetch(window.location.href, {
 									method: 'POST',
 									body: formData
 								});
 								
+								console.log('响应状态:', response.status); // 调试日志
+								
+								if (!response.ok) {
+									throw new Error(\`HTTP \${response.status}: \${response.statusText}\`);
+								}
+								
 								const result = await response.json();
+								console.log('响应结果:', result); // 调试日志
 								
 								if (result.success) {
 									showMessage(result.message, 'success');
 									if (callback) callback(result);
 								} else {
 									showMessage(result.message, 'error');
+									if (callback) callback(result);
 								}
 							} catch (error) {
+								console.error('提交表单错误:', error); // 调试日志
 								showMessage('操作失败: ' + error.message, 'error');
+								if (callback) callback({success: false, message: error.message});
 							} finally {
-								button.disabled = false;
-								button.textContent = originalText;
+								if (button) {
+									button.disabled = false;
+									button.textContent = originalText;
+								}
 							}
 						}
 
@@ -1215,6 +1255,8 @@ async function AdminPanel(request, env) {
 								return;
 							}
 							
+							console.log('删除Token:', tokenValue); // 调试日志
+							
 							const form = document.createElement('form');
 							form.innerHTML = \`
 								<input type="hidden" name="action" value="delete_token">
@@ -1222,15 +1264,22 @@ async function AdminPanel(request, env) {
 							\`;
 							
 							submitForm(form, (result) => {
-								// 移除token项
-								const tokenItem = button.closest('.token-item');
-								tokenItem.style.transition = 'opacity 0.3s';
-								tokenItem.style.opacity = '0';
-								setTimeout(() => {
-									tokenItem.remove();
-									// 更新统计数据
-									updateStats();
-								}, 300);
+								console.log('删除结果:', result); // 调试日志
+								if (result.success) {
+									// 移除token项
+									const tokenItem = button.closest('.token-item');
+									if (tokenItem) {
+										tokenItem.style.transition = 'opacity 0.3s';
+										tokenItem.style.opacity = '0';
+										setTimeout(() => {
+											tokenItem.remove();
+											// 更新统计数据
+											updateStats();
+										}, 300);
+									}
+								} else {
+									showMessage(result.message || '删除失败', 'error');
+								}
 							});
 						}
 
