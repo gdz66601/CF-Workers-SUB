@@ -308,6 +308,13 @@ function base64Decode(str) {
 	return decoder.decode(bytes);
 }
 
+function base64Encode(str) {
+	const encoder = new TextEncoder();
+	const bytes = encoder.encode(str);
+	const binaryString = Array.from(bytes, byte => String.fromCharCode(byte)).join('');
+	return btoa(binaryString);
+}
+
 async function MD5MD5(text) {
 	const encoder = new TextEncoder();
 
