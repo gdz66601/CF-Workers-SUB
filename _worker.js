@@ -902,6 +902,126 @@ async function AdminPanel(request, env) {
 			const formData = await request.formData();
 			const action = formData.get('action');
 			
+			if (action === 'view_nodes') {
+				// 查看节点功能
+				try {
+					const subscriptionUrl = formData.get('subscriptionUrl');
+					if (!subscriptionUrl) {
+						return new Response(JSON.stringify({
+							success: false,
+							message: "请提供订阅链接"
+						}), {
+							headers: { "Content-Type": "application/json;charset=utf-8" }
+						});
+					}
+					
+					// 获取订阅内容
+					const response = await fetch(subscriptionUrl);
+					let content = await response.text();
+					
+					// 处理Base64编码的订阅
+					if (!content.includes('://') && isValidBase64(content)) {
+						content = base64Decode(content);
+					}
+					
+					// 解析节点
+					const nodes = await ADD(content);
+					const nodeList = nodes.filter(node => node.includes('://')).map((node, index) => {
+						// 解析节点信息
+						const protocol = node.split('://')[0];
+						let nodeName = '';
+						
+						// 提取节点名称
+						if (node.includes('#')) {
+							nodeName = decodeURIComponent(node.split('#')[1]);
+						} else {
+							nodeName = `节点${index + 1}`;
+						}
+						
+						return {
+							index: index,
+							protocol: protocol,
+							name: nodeName,
+							url: node,
+							preview: node.length > 100 ? node.substring(0, 100) + '...' : node
+						};
+					});
+					
+					return new Response(JSON.stringify({
+						success: true,
+						nodes: nodeList,
+						total: nodeList.length
+					}), {
+						headers: { "Content-Type": "application/json;charset=utf-8" }
+					});
+				} catch (error) {
+					return new Response(JSON.stringify({
+						success: false,
+						message: "获取节点信息失败: " + error.message
+					}), {
+						headers: { "Content-Type": "application/json;charset=utf-8" }
+					});
+				}
+			}
+			
+			if (action === 'filter_nodes') {
+				// 过滤节点功能
+				try {
+					const subscriptionUrl = formData.get('subscriptionUrl');
+					const excludeIndices = formData.get('excludeIndices');
+					
+					if (!subscriptionUrl) {
+						return new Response(JSON.stringify({
+							success: false,
+							message: "请提供订阅链接"
+						}), {
+							headers: { "Content-Type": "application/json;charset=utf-8" }
+						});
+					}
+					
+					// 获取订阅内容
+					const response = await fetch(subscriptionUrl);
+					let content = await response.text();
+					
+					// 处理Base64编码的订阅
+					if (!content.includes('://') && isValidBase64(content)) {
+						content = base64Decode(content);
+					}
+					
+					// 解析节点
+					const nodes = await ADD(content);
+					const validNodes = nodes.filter(node => node.includes('://'));
+					
+					// 过滤掉指定的节点
+					let filteredNodes = validNodes;
+					if (excludeIndices) {
+						const excludeList = excludeIndices.split(',').map(i => parseInt(i.trim()));
+						filteredNodes = validNodes.filter((node, index) => !excludeList.includes(index));
+					}
+					
+					// 生成过滤后的订阅内容
+					const filteredContent = filteredNodes.join('\n');
+					const base64Content = base64Encode(filteredContent);
+					
+					return new Response(JSON.stringify({
+						success: true,
+						filteredContent: base64Content,
+						originalCount: validNodes.length,
+						filteredCount: filteredNodes.length,
+						removedCount: validNodes.length - filteredNodes.length
+					}), {
+						headers: { "Content-Type": "application/json;charset=utf-8" }
+					});
+				} catch (error) {
+					return new Response(JSON.stringify({
+						success: false,
+						message: "过滤节点失败: " + error.message
+					}), {
+						headers: { "Content-Type": "application/json;charset=utf-8" }
+					});
+				}
+			}
+			
 			if (action === 'create_token') {
 				const tokenName = formData.get('tokenName');
 				const tokenValue = formData.get('tokenValue') || await generateRandomToken();
@@ -1291,6 +1411,112 @@ async function AdminPanel(request, env) {
 							document.querySelector('.stats .stat-item:nth-child(1) strong').textContent = tokenItems.length;
 							document.querySelector('.stats .stat-item:nth-child(2) strong').textContent = activeTokens;
 						}
+
+						// 查看节点
+						function viewNodes() {
+							const subscriptionUrl = document.getElementById('subscriptionUrl').value.trim();
+							if (!subscriptionUrl) {
+								showMessage('请输入订阅链接', 'error');
+								return;
+							}
+
+							const form = document.createElement('form');
+							form.innerHTML = \`
+								<input type="hidden" name="action" value="view_nodes">
+								<input type="hidden" name="subscriptionUrl" value="\${subscriptionUrl}">
+							\`;
+
+							submitForm(form, (result) => {
+								if (result.success) {
+									displayNodes(result.nodes);
+									document.getElementById('nodesList').style.display = 'block';
+									showMessage(\`成功获取 \${result.total} 个节点\`, 'success');
+								} else {
+									showMessage(result.message || '获取节点失败', 'error');
+								}
+							});
+						}
+
+						// 显示节点列表
+						function displayNodes(nodes) {
+							const container = document.getElementById('nodesContainer');
+							container.innerHTML = '';
+
+							if (nodes.length === 0) {
+								container.innerHTML = '<p>未找到有效节点</p>';
+								return;
+							}
+
+							nodes.forEach(node => {
+								const nodeDiv = document.createElement('div');
+								nodeDiv.className = 'node-item';
+								nodeDiv.style.cssText = 'border: 1px solid #ddd; margin: 5px 0; padding: 10px; border-radius: 5px; background: #f9f9f9;';
+								
+								nodeDiv.innerHTML = \`
+									<div style="display: flex; align-items: center; margin-bottom: 5px;">
+										<input type="checkbox" id="node_\${node.index}" checked style="margin-right: 10px;">
+										<label for="node_\${node.index}" style="font-weight: bold; color: #333;">
+											[\${node.protocol.toUpperCase()}] \${node.name}
+										</label>
+									</div>
+									<div style="font-size: 12px; color: #666; font-family: monospace; word-break: break-all;">
+										\${node.preview}
+									</div>
+								\`;
+								
+								container.appendChild(nodeDiv);
+							});
+						}
+
+						// 全选节点
+						function selectAll() {
+							const checkboxes = document.querySelectorAll('#nodesContainer input[type="checkbox"]');
+							checkboxes.forEach(cb => cb.checked = true);
+						}
+
+						// 全不选节点
+						function selectNone() {
+							const checkboxes = document.querySelectorAll('#nodesContainer input[type="checkbox"]');
+							checkboxes.forEach(cb => cb.checked = false);
+						}
+
+						// 过滤节点
+						function filterNodes() {
+							const subscriptionUrl = document.getElementById('subscriptionUrl').value.trim();
+							if (!subscriptionUrl) {
+								showMessage('请先查看节点', 'error');
+								return;
+							}
+
+							// 获取未选中的节点索引
+							const checkboxes = document.querySelectorAll('#nodesContainer input[type="checkbox"]');
+							const excludeIndices = [];
+							checkboxes.forEach((cb, index) => {
+								if (!cb.checked) {
+									const nodeIndex = cb.id.replace('node_', '');
+									excludeIndices.push(nodeIndex);
+								}
+							});
+
+							const form = document.createElement('form');
+							form.innerHTML = \`
+								<input type="hidden" name="action" value="filter_nodes">
+								<input type="hidden" name="subscriptionUrl" value="\${subscriptionUrl}">
+								<input type="hidden" name="excludeIndices" value="\${excludeIndices.join(',')}">
+							\`;
+
+							submitForm(form, (result) => {
+								if (result.success) {
+									document.getElementById('filteredContent').value = result.filteredContent;
+									document.getElementById('filterStats').textContent = 
+										\`原始节点: \${result.originalCount} 个，过滤后: \${result.filteredCount} 个，移除: \${result.removedCount} 个\`;
+									document.getElementById('filteredResult').style.display = 'block';
+									showMessage('过滤完成', 'success');
+								} else {
+									showMessage(result.message || '过滤失败', 'error');
+								}
+							});
+						}
 					</script>
 				</head>
 				<body>
@@ -1298,6 +1524,29 @@ async function AdminPanel(request, env) {
 						<h1>🛠️ ${FileName} 管理面板</h1>
 						
 						<div id="message" class="message"></div>
+						
+						<div class="section">
+							<h2>🔍 节点管理</h2>
+							<div class="form-group">
+								<label>订阅链接:</label>
+								<input type="text" id="subscriptionUrl" placeholder="输入订阅链接查看节点信息" style="width: 70%; display: inline-block;">
+								<button onclick="viewNodes()" class="btn btn-primary" style="width: 25%; margin-left: 5%;">查看节点</button>
+							</div>
+							<div id="nodesList" style="display: none;">
+								<h3>节点列表</h3>
+								<div id="nodesContainer"></div>
+								<div style="margin-top: 15px;">
+									<button onclick="filterNodes()" class="btn btn-success">生成过滤后的订阅</button>
+									<button onclick="selectAll()" class="btn btn-secondary">全选</button>
+									<button onclick="selectNone()" class="btn btn-secondary">全不选</button>
+								</div>
+								<div id="filteredResult" style="display: none; margin-top: 15px;">
+									<h4>过滤结果</h4>
+									<textarea id="filteredContent" readonly style="width: 100%; height: 100px; font-family: monospace; font-size: 12px;"></textarea>
+									<p id="filterStats"></p>
+								</div>
+							</div>
+						</div>
 						
 						<div class="section">
 							<h2>📊 系统概览</h2>
